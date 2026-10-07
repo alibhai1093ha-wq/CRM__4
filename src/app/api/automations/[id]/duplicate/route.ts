@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { supabaseAdmin } from '@/lib/automations/admin-client'
 
@@ -12,24 +11,22 @@ export async function POST(
   // Duplicating creates a new automation row — a write. Enforce `agent`
   // (the service-role client below bypasses the agent-gated
   // automations_insert RLS).
+  let ctx: Awaited<ReturnType<typeof requireRole>>
   try {
-    await requireRole('agent')
+    ctx = await requireRole('agent')
   } catch (err) {
     return toErrorResponse(err)
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
   const admin = supabaseAdmin()
+  // Account scope, not author scope: an account member may duplicate a
+  // teammate's automation (RLS shares it) — filtering on user_id here
+  // returned "Not found" for rows the list page had just shown them.
   const { data: original, error: origErr } = await admin
     .from('automations')
     .select('*')
     .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('account_id', ctx.accountId)
     .maybeSingle()
   if (origErr) return NextResponse.json({ error: origErr.message }, { status: 500 })
   if (!original) return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -40,7 +37,7 @@ export async function POST(
       // Clone into the same account as the original. account_id is NOT
       // NULL post-017, so the INSERT fails the constraint without it.
       account_id: original.account_id,
-      user_id: user.id,
+      user_id: ctx.userId,
       name: `${original.name} (Copy)`,
       description: original.description,
       trigger_type: original.trigger_type,

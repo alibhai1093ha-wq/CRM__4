@@ -625,6 +625,21 @@ export interface WaitStepConfig {
   unit: 'seconds' | 'minutes' | 'hours' | 'days';
 }
 
+export type ElseCooldownUnit = 'seconds' | 'minutes' | 'hours' | 'days';
+
+/**
+ * Per-contact cooldown for a condition's OTHER (`no`) branch. Once the
+ * branch has fired for a contact, re-fires are suppressed for
+ * `amount`+`unit` so a repeated inbound message can't run the ELSE
+ * actions over and over. Absent for legacy conditions — the engine
+ * treats that as `enabled: false` (today's behaviour).
+ */
+export interface ElseCooldownConfig {
+  enabled: boolean;
+  amount: number;
+  unit: ElseCooldownUnit;
+}
+
 export type ConditionSubject =
   | 'contact_field'
   | 'tag_presence'
@@ -657,6 +672,12 @@ export interface ConditionStepConfig extends ConditionPredicate {
    * legacy two-branch conditions.
    */
   else_ifs?: ConditionPredicate[];
+  /**
+   * Optional cooldown gating the OTHER (`no`) branch per contact —
+   * see `ElseCooldownConfig`. Set by the ELSE Cooldown editor in the
+   * builder; missing means the branch runs on every match (legacy).
+   */
+  else_cooldown?: ElseCooldownConfig;
 }
 
 export interface SendWebhookStepConfig {

@@ -111,6 +111,25 @@ BEGIN
       'touch_presence is not granted to authenticated — migration 046 did not apply';
   END IF;
 
+  -- ELSE-branch cooldown (048): the table AND the claim function both
+  -- carry IF NOT EXISTS / CREATE OR REPLACE guards, so a typo'd name
+  -- replays as a green no-op and every ELSE branch silently runs
+  -- ungated. Assert the object and its service_role grant exist.
+  IF to_regclass('public.automation_else_cooldowns') IS NULL THEN
+    RAISE EXCEPTION
+      'automation_else_cooldowns is missing — migration 048 did not apply';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.role_routine_grants
+    WHERE routine_schema = 'public'
+      AND routine_name = 'claim_else_cooldown'
+      AND grantee = 'service_role'
+      AND privilege_type = 'EXECUTE'
+  ) THEN
+    RAISE EXCEPTION
+      'claim_else_cooldown is not granted to service_role — migration 048 did not apply';
+  END IF;
+
   RAISE NOTICE 'schema verification passed';
 END
 $$;

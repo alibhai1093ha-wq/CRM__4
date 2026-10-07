@@ -20,6 +20,7 @@ import type {
   AssignConversationStepConfig,
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
+import { claimElseCooldownForStep } from './else-cooldown-claim'
 import { addContactTagIfAbsent } from '@/lib/contacts/tag-write'
 import { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from '@/lib/contacts/tag-chain'
 import { engineSendText, engineSendTemplate, engineSendInteractive, engineSendMedia } from './meta-send'
@@ -309,6 +310,42 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
       if (step.step_type === 'condition') {
         const cfg = step.step_config as ConditionStepConfig
         const branch = await resolveConditionBranch(cfg, args)
+
+        // ELSE (OTHER) branch cooldown: one window per
+        // (automation, contact) — see else-cooldown-claim.ts. Only the
+        // 'no' branch is gated; IF / ELSE IF branches fire as before,
+        // and a disabled cooldown short-circuits inside the claim with
+        // no round trip. Manual triggers without a contact can't be
+        // keyed to a person, so they never gate.
+        if (branch === 'no' && args.contactId) {
+          const claim = await claimElseCooldownForStep(cfg, {
+            automationId: args.automation.id,
+            contactId: args.contactId,
+          })
+          if (claim !== 'granted') {
+            // 'denied' — this contact already ran the ELSE branch inside
+            // the window: skip it, which is the whole point of the
+            // feature. 'error' — the check itself broke; skip too
+            // (fail-closed), because dropping the cooldown silently is
+            // what lets repeated messages bypass it. Either way the
+            // automation continues past the condition.
+            results.push({
+              step_id: step.id,
+              step_type: 'condition',
+              status: claim === 'error' ? 'failed' : 'success',
+              detail:
+                claim === 'denied'
+                  ? 'branch=no (else cooldown active, skipped)'
+                  : 'else cooldown check failed, skipped branch=no',
+            })
+            if (claim === 'error') {
+              status = 'failed'
+              errorMessage = 'else cooldown check failed'
+            }
+            continue
+          }
+        }
+
         results.push({
           step_id: step.id,
           step_type: 'condition',

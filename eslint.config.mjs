@@ -13,7 +13,10 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
     // Vendored minified opus-recorder encoder worker (served statically).
+    // `**/` also covers worktree copies of the app (e.g. .kilo/worktrees/*),
+    // where the same vendored file otherwise gets linted.
     "public/opus/**",
+    "**/public/opus/**",
   ]),
 ]);
 

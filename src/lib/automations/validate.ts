@@ -140,6 +140,7 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
       elseIfs.forEach((ei, i) => {
         validatePredicate(ei as Record<string, unknown>, `${path}.else_ifs[${i}]`, issues)
       })
+      validateElseCooldown(c, path, issues)
       break
     case 'send_webhook':
       if (!nonEmpty(c.url)) {
@@ -235,7 +236,15 @@ function validatePredicate(
   if (!nonEmpty(c.subject)) {
     issues.push({ path: `${path}.subject`, message: 'condition subject is required' })
   }
-  if (!nonEmpty(c.operand)) {
+  // `message_content` is the one subject that has no operand: the
+  // builder hides that input for it (PredicateFields only renders the
+  // operand when subject !== "message_content") and the engine compares
+  // `value` against the message text directly. Requiring operand here
+  // made an otherwise-valid "message contains <keyword>" condition fail
+  // activation with "condition operand is required" — the Save error
+  // users hit. Every other subject still needs its operand (tag id,
+  // field name, "HH:mm-HH:mm").
+  if (c.subject !== 'message_content' && !nonEmpty(c.operand)) {
     issues.push({ path: `${path}.operand`, message: 'condition operand is required' })
   }
   if (c.subject === 'message_content' && !nonEmpty(c.value)) {
@@ -249,6 +258,34 @@ function validatePredicate(
     issues.push({
       path: `${path}.operator`,
       message: 'condition operator must be "contains" or "exact_match"',
+    })
+  }
+}
+
+/**
+ * The per-contact ELSE (OTHER) branch cooldown, when switched on.
+ * Only checked while `enabled` — a saved-but-off cooldown keeps its
+ * default (5 minutes) and never blocks activation.
+ */
+function validateElseCooldown(
+  c: Record<string, unknown>,
+  path: string,
+  issues: ValidationIssue[],
+): void {
+  const cd = c.else_cooldown
+  if (!cd || typeof cd !== 'object') return
+  const d = cd as Record<string, unknown>
+  if (d.enabled !== true) return
+  if (typeof d.amount !== 'number' || !Number.isFinite(d.amount) || d.amount <= 0) {
+    issues.push({
+      path: `${path}.else_cooldown.amount`,
+      message: 'ELSE cooldown amount must be greater than 0',
+    })
+  }
+  if (!['seconds', 'minutes', 'hours', 'days'].includes(String(d.unit))) {
+    issues.push({
+      path: `${path}.else_cooldown.unit`,
+      message: 'ELSE cooldown unit must be seconds, minutes, hours, or days',
     })
   }
 }

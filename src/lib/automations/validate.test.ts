@@ -206,6 +206,66 @@ describe("validateStepsForActivation", () => {
       "steps[0].subject",
     ]);
   });
+
+  it("requires no operand for message_content (the Save-time failure)", () => {
+    // The builder hides the operand input for this subject and the
+    // engine compares `value` against the message text — demanding an
+    // operand rejected a condition the UI had just shown as complete.
+    expect(
+      validateStepsForActivation([
+        {
+          step_type: "condition",
+          step_config: { subject: "message_content", value: "order", operator: "contains" },
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("still requires a value for message_content", () => {
+    const issues = validateStepsForActivation([
+      { step_type: "condition", step_config: { subject: "message_content", value: "" } },
+    ]);
+    expect(issues.map((i) => i.path)).toEqual(["steps[0].value"]);
+  });
+
+  it("still requires an operand for every other subject", () => {
+    const issues = validateStepsForActivation([
+      { step_type: "condition", step_config: { subject: "tag_presence" } },
+    ]);
+    expect(issues.map((i) => i.path)).toEqual(["steps[0].operand"]);
+  });
+
+  it("validates an enabled ELSE cooldown amount and unit", () => {
+    const issues = validateStepsForActivation([
+      {
+        step_type: "condition",
+        step_config: {
+          subject: "tag_presence",
+          operand: "vip",
+          else_cooldown: { enabled: true, amount: 0, unit: "fortnights" },
+        },
+      },
+    ]);
+    expect(issues.map((i) => i.path)).toEqual([
+      "steps[0].else_cooldown.amount",
+      "steps[0].else_cooldown.unit",
+    ]);
+  });
+
+  it("does not validate a cooldown that is switched off", () => {
+    expect(
+      validateStepsForActivation([
+        {
+          step_type: "condition",
+          step_config: {
+            subject: "tag_presence",
+            operand: "vip",
+            else_cooldown: { enabled: false, amount: 0, unit: "fortnights" },
+          },
+        },
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("validateTriggerForActivation", () => {

@@ -51,6 +51,7 @@ import type {
   AutomationStepType,
   AutomationTriggerType,
   CustomField,
+  ElseCooldownConfig,
   InteractiveMessagePayload,
   KeywordMatchTriggerConfig,
   MessageTemplate,
@@ -73,6 +74,7 @@ import {
   type ParentScope,
   type StepPath,
 } from "@/lib/automations/builder-tree"
+import { elseCooldownFrom } from "@/lib/automations/else-cooldown"
 import { cn } from "@/lib/utils"
 
 // ------------------------------------------------------------
@@ -1212,6 +1214,7 @@ function ConditionBranches({
 } & Omit<StepListProps, "steps" | "basePath" | "scope">) {
   const t = useTranslations("Automations.builder")
   const elseIfs = conditionElseIfs(step.step_config)
+  const cooldown = elseCooldownFrom(step.step_config)
   const branches = step.branches ?? {}
   const columns: Array<{
     label: string
@@ -1232,7 +1235,20 @@ function ConditionBranches({
       branch: `else_if_${i + 1}`,
     })),
     // OTHER — the legacy 'no' bucket, renamed for the multi-branch model.
-    { label: t("branches.no"), color: "text-rose-400", bucket: branches.no ?? [], branch: "no" },
+    // Its summary is where a per-contact ELSE cooldown is advertised:
+    // the one branch a repeated message would otherwise re-run.
+    {
+      label: t("branches.no"),
+      color: "text-rose-400",
+      bucket: branches.no ?? [],
+      branch: "no",
+      summary: cooldown.enabled
+        ? t("config.elseCooldown.summary", {
+            amount: cooldown.amount,
+            unit: t(`config.unitsLower.${cooldown.unit}`),
+          })
+        : undefined,
+    },
   ]
   return (
     // Stack branches vertically until THIS CARD is wide enough for
@@ -1473,6 +1489,70 @@ function PredicateFields({
   )
 }
 
+/**
+ * ELSE (OTHER) branch cooldown — one window per contact, so a contact
+ * re-sending messages doesn't re-run the `no` branch actions on each
+ * one. Writes `step_config.else_cooldown`; a condition saved before
+ * this feature has no such key and reads as the default (off), which
+ * is exactly the old behaviour.
+ */
+function ElseCooldownEditor({
+  cfg,
+  onChange,
+}: {
+  cfg: Record<string, unknown>
+  onChange: (patch: Record<string, unknown>) => void
+}) {
+  const t = useTranslations("Automations.builder")
+  const cd = elseCooldownFrom(cfg)
+  const set = (patch: Partial<ElseCooldownConfig>) =>
+    onChange({ else_cooldown: { ...cd, ...patch } })
+  return (
+    <div className="mt-3 rounded-md border border-dashed border-border p-2.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-foreground text-[11px] font-semibold uppercase">
+            {t("config.elseCooldown.label")}
+          </div>
+          <p className="text-muted-foreground mt-0.5 text-[11px] leading-snug">
+            {t("config.elseCooldown.hint")}
+          </p>
+        </div>
+        <Switch
+          checked={cd.enabled}
+          onCheckedChange={(v) => set({ enabled: !!v })}
+          aria-label={t("config.elseCooldown.label")}
+        />
+      </div>
+      {cd.enabled && (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <FieldBlock label={t("config.elseCooldown.everyLabel")}>
+            <Input
+              type="number"
+              min={1}
+              value={cd.amount}
+              onChange={(e) => set({ amount: Math.max(1, Number(e.target.value)) })}
+              className="bg-muted text-foreground"
+            />
+          </FieldBlock>
+          <FieldBlock label={t("config.unitLabel")}>
+            <select
+              value={cd.unit}
+              onChange={(e) => set({ unit: e.target.value as ElseCooldownConfig["unit"] })}
+              className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-sm text-foreground"
+            >
+              <option value="seconds">{t("config.units.seconds")}</option>
+              <option value="minutes">{t("config.units.minutes")}</option>
+              <option value="hours">{t("config.units.hours")}</option>
+              <option value="days">{t("config.units.days")}</option>
+            </select>
+          </FieldBlock>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StepEditor({
   step,
   onChange,
@@ -1685,6 +1765,7 @@ function StepEditor({
             <Plus className="h-3.5 w-3.5" />
             {t("config.addElseIf")}
           </Button>
+          <ElseCooldownEditor cfg={cfg} onChange={(patch) => set(patch)} />
         </>
       )
     }

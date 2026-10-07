@@ -21,6 +21,12 @@ const h = vi.hoisted(() => ({
     upsertCalls: [] as { table: string; payload: unknown }[],
     logInserts: [] as Record<string, unknown>[],
     logUpdates: [] as Record<string, unknown>[],
+    /** Windows claimed through the claim_else_cooldown RPC, in order. */
+    cooldownCalls: [] as Record<string, unknown>[],
+    /** Simulated (automation:contact) → last claim, ms epoch. */
+    cooldowns: new Map<string, number>(),
+    /** When set, every cooldown claim fails with this PostgREST error. */
+    cooldownRpcError: null as { code: string; message: string } | null,
   },
 }));
 
@@ -122,7 +128,25 @@ vi.mock("./admin-client", () => {
         state.fromCalls.push(t);
         return builder(t);
       },
-      rpc: () => Promise.resolve({ error: null }),
+      // increment_automation_execution_count (and anything else) is a
+      // fire-and-forget call; claim_else_cooldown is simulated against
+      // state.cooldowns so tests can exercise the real window logic.
+      rpc: (fn: string, params?: Record<string, unknown>) => {
+        if (fn !== "claim_else_cooldown") return Promise.resolve({ error: null });
+        state.cooldownCalls.push(params ?? {});
+        if (state.cooldownRpcError) {
+          return Promise.resolve({ data: null, error: state.cooldownRpcError });
+        }
+        const key = `${params?.p_automation_id}:${params?.p_contact_id}`;
+        const windowMs = (Number(params?.p_cooldown_seconds) || 0) * 1000;
+        const now = Date.now();
+        const last = state.cooldowns.get(key);
+        if (last !== undefined && now - last < windowMs) {
+          return Promise.resolve({ data: false, error: null });
+        }
+        state.cooldowns.set(key, now);
+        return Promise.resolve({ data: true, error: null });
+      },
     }),
   };
 });
@@ -150,6 +174,9 @@ beforeEach(() => {
   h.state.upsertCalls = [];
   h.state.logInserts = [];
   h.state.logUpdates = [];
+  h.state.cooldownCalls = [];
+  h.state.cooldowns = new Map();
+  h.state.cooldownRpcError = null;
 });
 
 describe("runAutomationsForTrigger — tenant isolation", () => {
@@ -899,3 +926,155 @@ function branchStepForOperatorTest(stepId: string, branch: string) {
     step_config: { field: "company", value: "OTHER_RAN" },
   };
 }
+
+describe("ELSE branch cooldown — one window per (automation, contact)", () => {
+  const COND_ID = "cond-cd";
+
+  /** A message_content condition whose ELSE branch writes a marker. */
+  function condition(elseCooldown?: Record<string, unknown>) {
+    return {
+      id: COND_ID,
+      automation_id: "a1",
+      step_type: "condition",
+      position: 0,
+      parent_step_id: null,
+      step_config: {
+        subject: "message_content",
+        value: "hello",
+        operator: "contains",
+        ...(elseCooldown ? { else_cooldown: elseCooldown } : {}),
+      },
+    };
+  }
+
+  function branchStep(stepId: string, branch: string, value: string) {
+    return {
+      id: stepId,
+      automation_id: "a1",
+      step_type: "update_contact_field",
+      position: 0,
+      parent_step_id: COND_ID,
+      branch,
+      step_config: { field: "company", value },
+    };
+  }
+
+  function run(messageText: string, contactId = "c1") {
+    return runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "new_message_received",
+      contactId,
+      context: { message_text: messageText },
+    });
+  }
+
+  function companyWrites(): string[] {
+    return h.state.updateCalls
+      .filter((c) => c.table === "contacts")
+      .map((c) => (c.payload as { company: string }).company);
+  }
+
+  /** Detail recorded for the condition step of the most recent run. */
+  function lastConditionDetail(): string | undefined {
+    const updates = h.state.logUpdates;
+    const last = updates[updates.length - 1];
+    const results = (last?.steps_executed as { detail?: string }[] | undefined) ?? [];
+    return results[0]?.detail;
+  }
+
+  function setupSteps(elseCooldown?: Record<string, unknown>) {
+    h.state.owned = { id: "c1" };
+    h.state.automations = [automationWithUpdateStep()];
+    h.state.steps = [
+      condition(elseCooldown),
+      branchStep("b-yes", "yes", "IF_RAN"),
+      branchStep("b-no", "no", "ELSE_RAN"),
+    ];
+  }
+
+  it("runs the ELSE branch and claims the window on the first match", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+
+    await run("completely unrelated");
+
+    expect(companyWrites()).toEqual(["ELSE_RAN"]);
+    expect(h.state.cooldownCalls).toHaveLength(1);
+    expect(h.state.cooldownCalls[0]).toEqual({
+      p_automation_id: "a1",
+      p_contact_id: "c1",
+      p_cooldown_seconds: 3600,
+    });
+    expect(lastConditionDetail()).toBe("branch=no");
+  });
+
+  it("suppresses a repeat ELSE run inside the window", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+
+    await run("first unrelated message");
+    h.state.updateCalls = [];
+    await run("second unrelated message");
+
+    expect(companyWrites()).toEqual([]);
+    expect(lastConditionDetail()).toBe("branch=no (else cooldown active, skipped)");
+  });
+
+  it("still runs the IF branch while the ELSE window is open", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+
+    await run("unrelated");
+    h.state.updateCalls = [];
+    await run("hello again");
+
+    expect(companyWrites()).toEqual(["IF_RAN"]);
+    // The IF branch never touches the cooldown.
+    expect(h.state.cooldownCalls).toHaveLength(1);
+  });
+
+  it("keys the window per contact", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+
+    await run("unrelated", "c1");
+    await run("unrelated", "c2");
+
+    expect(companyWrites()).toEqual(["ELSE_RAN", "ELSE_RAN"]);
+    expect(h.state.cooldownCalls).toHaveLength(2);
+  });
+
+  it("makes no RPC call at all when the cooldown is off (legacy config)", async () => {
+    setupSteps();
+
+    await run("unrelated");
+
+    expect(companyWrites()).toEqual(["ELSE_RAN"]);
+    expect(h.state.cooldownCalls).toHaveLength(0);
+  });
+
+  it("degrades to running the branch when migration 048 is missing", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+    h.state.cooldownRpcError = {
+      code: "PGRST202",
+      message: "Could not find the function public.claim_else_cooldown",
+    };
+
+    await run("unrelated");
+
+    expect(companyWrites()).toEqual(["ELSE_RAN"]);
+    expect(lastConditionDetail()).toBe("branch=no");
+  });
+
+  it("skips the ELSE branch and fails the run when the check itself errors", async () => {
+    setupSteps({ enabled: true, amount: 1, unit: "hours" });
+    h.state.cooldownRpcError = { code: "XX000", message: "disk full" };
+
+    await run("unrelated");
+
+    expect(companyWrites()).toEqual([]);
+    expect(lastConditionDetail()).toBe(
+      "else cooldown check failed, skipped branch=no",
+    );
+    const updates = h.state.logUpdates;
+    const last = updates[updates.length - 1];
+    expect(last.status).toBe("failed");
+    expect(last.error_message).toBe("else cooldown check failed");
+  });
+});

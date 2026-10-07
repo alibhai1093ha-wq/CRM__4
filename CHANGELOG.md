@@ -9,6 +9,50 @@ Versions follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0, `MINOR` bumps cover new modules; `PATCH` bumps cover bug fixes
 and polish.
 
+## [Unreleased]
+
+Adds a per-contact cooldown to a condition's ELSE branch, and fixes two
+ways an automation could be rejected or hidden from the people who can
+see it in the list.
+
+> **Migration required:** apply `supabase/migrations/048_else_cooldown.sql`
+> (adds the `automation_else_cooldowns` table plus the
+> `claim_else_cooldown` function the engine calls through). Until it is
+> applied the engine logs a warning and runs the ELSE branch ungated, so
+> nothing breaks — the cooldown simply doesn't engage.
+
+### Added
+
+- **ELSE cooldown, per contact.** A condition step now has an **ELSE
+  cooldown** switch (default off). Switch it on and, after the ELSE
+  (OTHER) branch has run for a contact, re-fires are suppressed for the
+  window you set — so a contact sending the same message five times
+  doesn't run your ELSE actions five times. Keyed on
+  automation + contact, claimed atomically in Postgres so two
+  simultaneous deliveries can't both slip through, and time-stamped by
+  the database clock. The NO branch header shows the active window
+  (`runs at most once every 5 minutes`), and activation validates the
+  amount and unit. IF and ELSE IF branches are untouched, and an
+  automation saved before this change behaves exactly as it did.
+
+### Fixed
+
+- **Saving an IF condition with a keyword failed activation.** Choosing
+  *Message content* as the subject hides the Operand input (the engine
+  compares the Value against the message text), but activation
+  validation still demanded an operand — so a condition the builder
+  showed as complete was rejected with *"condition operand is required"*
+  at `steps[0].operand`. The operand is now required for every subject
+  except `message_content`, which requires a Value instead.
+
+- **"Not found" on an automation you could see in the list.**
+  `GET`/`PATCH`/`DELETE /api/automations/[id]` and the duplicate action
+  scoped themselves to the original author's `user_id`, while RLS (and
+  the list page) share automations across an account. Opening,
+  duplicating or deleting a teammate's automation therefore returned a
+  bare 404. These routes now scope by `account_id`, matching RLS and the
+  engine.
+
 ## [0.8.1] — 2026-07-10
 
 Fixes inbound chats fragmenting into multiple threads for the same
